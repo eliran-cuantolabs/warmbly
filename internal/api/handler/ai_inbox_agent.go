@@ -296,13 +296,13 @@ func (r upsertThreadDraftRequest) params() (repository.UpsertDraftParams, *errx.
 	source := strings.TrimSpace(r.Source)
 	intent := strings.TrimSpace(r.IntentClass)
 	switch {
-	case thread == "" || utf8.RuneCountInString(thread) > maxThreadDraftThread:
+	case thread == "" || utf8.RuneCountInString(thread) > maxThreadDraftThread || strings.ContainsRune(thread, 0):
 		return bad("thread_id is required and at most 998 characters.")
-	case body == "" || !utf8.ValidString(body) || utf8.RuneCountInString(body) > maxThreadDraftBody:
+	case body == "" || !utf8.ValidString(body) || strings.ContainsRune(body, 0) || utf8.RuneCountInString(body) > maxThreadDraftBody:
 		return bad("body is required, valid text, and at most 8000 characters.")
 	case source == "" || len(source) > maxThreadDraftField || !threadDraftSource.MatchString(source):
 		return bad("source is required: letters, digits, dot, dash or underscore, at most 40 characters.")
-	case utf8.RuneCountInString(intent) > maxThreadDraftField || !utf8.ValidString(intent):
+	case utf8.RuneCountInString(intent) > maxThreadDraftField || !utf8.ValidString(intent) || strings.ContainsRune(intent, 0):
 		return bad("intent_class is at most 40 characters.")
 	}
 	conf := 0.0
