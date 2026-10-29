@@ -1139,3 +1139,19 @@ describe("sanitizeUniboxRailFavorites", () => {
     }
   });
 });
+
+it("counts pending agent drafts on Drafts and highlights them", () => {
+  const saved = overview.data;
+  overview.data = {
+    ...saved,
+    awaiting_agent_draft: 3,
+    folders: [...saved.folders, { folder: "drafts", unread: 0, total: 1 }],
+  };
+  try {
+    mountRail();
+    const rows = Array.from(document.querySelectorAll("[data-rail-row]")).map((r) => r.textContent ?? "");
+    expect(rows.find((r) => r.startsWith("Drafts"))).toBe("Drafts4");
+  } finally {
+    overview.data = saved;
+  }
+});

@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/warmbly/warmbly/internal/infrastructure/db"
 	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/pkg/systemmail"
 )
 
 type UpdateUniboxEntry struct {
@@ -258,26 +259,38 @@ func (r *uniboxRepository) CreateEntry(ctx context.Context, userID uuid.UUID, e 
 			flags, bcc, cc, from_addr, in_reply_to, reply_to,
 			to_addr, subject, size, internal_date, sent_date,
 			snippet, seen, created_at, updated_at, body_text, folder,
-			provider_folder, automated, filed_forward
+			provider_folder, automated, filed_forward, system_notice
 		) VALUES (
 			$1, $2, $3, $4, $5, COALESCE((SELECT thread_id FROM fwd), $6), $7,
 			$8, $9, $10, $11,
 			$12, $13, $14, $15, $16, $17,
 			$18, $19, $20, $21, $22,
 			$23, $24, $25, $26, $27, $28,
-			$28,
+			$29,
 			-- A row re-created by a sync keeps the verdict its message already has.
-			EXISTS (
+			$30 OR EXISTS (
 				SELECT 1 FROM inbox_tag_results r
 				WHERE r.organization_id = (SELECT organization_id FROM email_accounts WHERE id = $3)
 				  AND r.message_id = $7 AND $7 <> ''
 				  AND r.automated
 			),
-			EXISTS (SELECT 1 FROM fwd)
+			EXISTS (SELECT 1 FROM fwd),
+			$30
 		)
 		ON CONFLICT (id) DO NOTHING
 		RETURNING thread_id
 	`
+
+	// A message starts where the provider put it; a system notice is filed to Archive, read, while provider_folder keeps the provider's placement for sync.
+	providerFolder := models.NormalizeFolder(e.Folder, e.Flags)
+	folder, seen := providerFolder, e.Seen
+	notice := IsSystemNotice(e)
+	if notice {
+		seen = true
+		if folder == models.FolderInbox {
+			folder = models.FolderArchive
+		}
+	}
 
 	// The array columns are NOT NULL. A nil Go slice binds as SQL NULL, so a
 	// message with no In-Reply-To (any thread root) would fail the insert.
@@ -288,10 +301,8 @@ func (r *uniboxRepository) CreateEntry(ctx context.Context, userID uuid.UUID, e 
 		textArray(e.Flags), textArray(e.BCC), textArray(e.CC), textArray(e.FromAddr),
 		textArray(e.InReplyTo), textArray(e.ReplyTo), textArray(e.ToAddr),
 		e.Subject, e.Size, e.InternalDate, e.SentDate,
-		e.Snippet, e.Seen, e.CreatedAt, e.UpdatedAt, e.BodyText,
-		// $28 is both columns: a message starts out where the provider put it,
-		// and only diverges once someone files it in Warmbly.
-		models.NormalizeFolder(e.Folder, e.Flags),
+		e.Snippet, seen, e.CreatedAt, e.UpdatedAt, e.BodyText,
+		folder, providerFolder, notice,
 	).Scan(&threadID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Already stored: the conflict leaves the row as it was.
@@ -302,6 +313,11 @@ func (r *uniboxRepository) CreateEntry(ctx context.Context, userID uuid.UUID, e 
 	}
 	e.ThreadID = threadID
 	return nil
+}
+
+// IsSystemNotice reports whether an arriving message is inbound mail from a provider notice sender (systemmail).
+func IsSystemNotice(e *models.EmailMessageStoreData) bool {
+	return e.MayBeInbound() && systemmail.IsProviderNotice(e.FromAddr)
 }
 
 // FiledSentForward is a stored copy FileSentForward moved, with its mailbox owner.
@@ -745,6 +761,14 @@ func uniboxSearchQuery(orgID uuid.UUID, params *models.MailSearchParams) (string
 		inner += ` AND ue.folder NOT IN ` + foldersOutsideWorkingViews
 	}
 
+	// System notices show only in their own folder (never Inbox) and in a search.
+	searching := (params.Subject != nil && *params.Subject != "") ||
+		(params.Sender != nil && *params.Sender != "") ||
+		(params.Address != nil && *params.Address != "")
+	if !searching && (params.Folder == nil || *params.Folder == models.FolderInbox) {
+		inner += ` AND NOT ue.system_notice`
+	}
+
 	// Snooze handling. nil = exclude snoozed (the inbox default), so
 	// threads with an active snooze never appear unless asked for.
 	switch {
@@ -981,6 +1005,7 @@ func (r *uniboxRepository) GetUnseenCount(ctx context.Context, orgID uuid.UUID, 
 		WHERE ue.email_id IN (SELECT id FROM email_accounts WHERE organization_id = $1)
 		  AND ue.seen = FALSE
 		  AND ue.folder = '` + models.FolderInbox + `'
+		  AND NOT ue.system_notice
 		  AND NOT EXISTS (
 			SELECT 1 FROM unibox_snoozes s
 			WHERE s.organization_id = $1 AND s.user_id = ue.user_id
@@ -1006,6 +1031,7 @@ func (r *uniboxRepository) UnseenCountForMailboxes(ctx context.Context, orgID uu
 		  AND ue.email_id = ANY($2::uuid[])
 		  AND ue.seen = FALSE
 		  AND ue.folder = '` + models.FolderInbox + `'
+		  AND NOT ue.system_notice
 		  AND NOT EXISTS (
 			SELECT 1 FROM unibox_snoozes s
 			WHERE s.organization_id = $1 AND s.user_id = ue.user_id
@@ -1754,6 +1780,7 @@ func (r *uniboxRepository) overview(ctx context.Context, orgID uuid.UUID, accoun
 			FROM unibox_emails e
 			WHERE e.email_id IN `+mailboxes+`
 			  AND e.folder NOT IN `+foldersOutsideAllMail+`
+			  AND NOT e.system_notice
 		),
 		threads AS (
 			SELECT
@@ -1819,6 +1846,7 @@ func (r *uniboxRepository) overview(ctx context.Context, orgID uuid.UUID, accoun
 			  AND s.snoozed_until > NOW()
 		  )
 		  AND NOT (e.folder = 'inbox' AND `+automatedThreadSQL("e.thread_id", "e.automated", "$1")+`)
+		  AND NOT e.system_notice
 		GROUP BY e.folder
 	`, orgID)
 	if err != nil {
@@ -1861,6 +1889,7 @@ func (r *uniboxRepository) overview(ctx context.Context, orgID uuid.UUID, accoun
 		FROM email_accounts ea
 		LEFT JOIN unibox_emails ue ON ue.email_id = ea.id AND ue.user_id = ea.user_id
 			AND ue.folder NOT IN `+foldersOutsideWorkingViews+`
+			AND NOT ue.system_notice
 			AND NOT `+automatedThreadSQL("ue.thread_id", "ue.automated", "$1")+`
 		WHERE ea.organization_id = $1`+onlyMailboxes("ea.id")+`
 		GROUP BY ea.id, ea.email, ea.name

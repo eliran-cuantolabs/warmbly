@@ -45,7 +45,7 @@ func TestLiveUniboxAutomatedLeavesTheInbox(t *testing.T) {
 	ours := f.mailboxAddress(t, repo)
 	now := time.Now().UTC()
 
-	alert := f.scopedMessage(t, repo, "thread-alert", "Google <no-reply@accounts.google.com>", models.FolderInbox, now)
+	alert := f.scopedMessage(t, repo, "thread-alert", "Acme Billing <billing@acme.example>", models.FolderInbox, now)
 	f.judge(t, handle.Pool, alert, "thread-alert", true)
 
 	f.scopedMessage(t, repo, "thread-person", "them@example.com", models.FolderInbox, now)

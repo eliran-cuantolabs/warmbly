@@ -32,14 +32,17 @@ import { cn } from "@/lib/utils";
 import type { UniboxSearchParams } from "@/lib/api/models/app/unibox/UniboxSearch";
 import { Checkbox } from "@/components/ui/checkbox";
 
-type Bucket = "today" | "yesterday" | "week" | "earlier";
+type Bucket = "agent" | "today" | "yesterday" | "week" | "earlier";
 
 const BUCKET_LABELS: Record<Bucket, string> = {
+  agent: "Agent drafts",
   today: "Today",
   yesterday: "Yesterday",
   week: "This week",
   earlier: "Earlier",
 };
+
+const NO_ROWS: ReturnType<typeof useUniboxSearch>["emails"] = [];
 
 // Views where an empty list means the work is done rather than that nothing
 // ever landed there.
@@ -121,7 +124,26 @@ export function ConversationList({
   const emptyScope = params.accountIds?.length === 0 || params.categoryIds?.length === 0;
   const result = useUniboxSearch(merged, scopeKey, !emptyScope);
   const q = emptyScope ? { ...result, emails: [], isPending: false, isFetching: false, hasNextPage: false } : result;
-  const emails = q.emails;
+
+  // Drafts lists threads with a pending inbox-agent draft above the mailbox's own drafts.
+  const draftsFolder = params.folder === "drafts" && !emptyScope;
+  const agentParams = React.useMemo<UniboxSearchParams>(
+    () => ({ ...merged, folder: undefined, agentDrafts: true }),
+    [merged],
+  );
+  const agent = useUniboxSearch(agentParams, `${scopeKey}:agent`, draftsFolder);
+  const agentRows = draftsFolder ? agent.emails : NO_ROWS;
+  const agentKeys = React.useMemo(
+    () => new Set(agentRows.map((r) => r.thread_id || r.id)),
+    [agentRows],
+  );
+  const emails = React.useMemo(
+    () =>
+      agentRows.length === 0
+        ? q.emails
+        : [...agentRows, ...q.emails.filter((r) => !agentKeys.has(r.thread_id || r.id))],
+    [agentRows, agentKeys, q.emails],
+  );
   const totalShown = emails.length;
   const activeFilters = countUserFilters(params, baseParams);
 
@@ -265,13 +287,13 @@ export function ConversationList({
     )[] = [];
     let last: Bucket | null = null;
     for (const e of emails) {
-      const b = bucketFor(new Date(e.internal_date));
+      const b = agentKeys.has(rowKey(e)) ? "agent" : bucketFor(new Date(e.internal_date));
       if (b !== last) out.push({ kind: "header", key: `bucket:${b}`, bucket: b });
       last = b;
       out.push({ kind: "row", key: rowKey(e), row: e });
     }
     return out;
-  }, [emails, rowKey]);
+  }, [emails, rowKey, agentKeys]);
 
   // Which items were on screen last time, and a generation per key that
   // left. A key that comes back gets a fresh presence key: AnimatePresence

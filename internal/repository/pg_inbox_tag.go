@@ -168,6 +168,7 @@ func (r *inboxTagRepository) Save(ctx context.Context, res *InboxTagResult) erro
 		WHERE ue.email_id = saved.email_account_id
 		  AND ue.message_id = saved.message_id
 		  AND ue.automated IS DISTINCT FROM saved.automated
+		  AND NOT ue.system_notice
 	`
 	answers := res.Answers
 	if len(answers) == 0 {
@@ -419,6 +420,7 @@ func (r *inboxTagRepository) Reopen(ctx context.Context, orgID uuid.UUID, messag
 			WHERE ue.email_id = dropped.email_account_id
 			  AND ue.message_id = dropped.message_id
 			  AND ue.automated
+			  AND NOT ue.system_notice
 		)
 		SELECT labels FROM dropped
 	`, orgID, messageID, kind).Scan(&labels)

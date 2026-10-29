@@ -126,6 +126,10 @@ func (s *JobsService) ingestNewEmail(ctx context.Context, e *models.JobEventNewE
 		CaptureError(e.UserID, e.Message.EmailID, err)
 		return err
 	}
+	// A provider's notice about the mailbox itself is stored archived and read; it is nobody's reply, so nothing below runs.
+	if repository.IsSystemNotice(e.Message) {
+		return nil
+	}
 	if e.Message != nil {
 		finish = arrivaldiag.Begin(ctx, arrivaldiag.Realtime)
 		inbox := s.emailInboxEvent(ctx, e.UserID, e.Message)
