@@ -131,6 +131,9 @@ func TestUpsertThreadDraftRejectsBadInput(t *testing.T) {
 		"confidence high":   `{"thread_id":"t","body":"hi","source":"llcdrop","confidence":1.5}`,
 		"confidence low":    `{"thread_id":"t","body":"hi","source":"llcdrop","confidence":-0.1}`,
 		"confidence string": `{"thread_id":"t","body":"hi","source":"llcdrop","confidence":"high"}`,
+		"thread NUL":        `{"thread_id":"t\u0000x","body":"hi","source":"llcdrop"}`,
+		"body NUL":          `{"thread_id":"t","body":"hi\u0000","source":"llcdrop"}`,
+		"intent NUL":        `{"thread_id":"t","body":"hi","source":"llcdrop","intent_class":"a\u0000"}`,
 		"not json":          `nope`,
 	} {
 		t.Run(name, func(t *testing.T) {

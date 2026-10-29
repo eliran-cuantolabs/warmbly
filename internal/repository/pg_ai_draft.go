@@ -263,38 +263,47 @@ func (r *aiDraftRepository) upsertPendingDraftOnce(ctx context.Context, orgID uu
 		return nil, false, err
 	}
 
-	if hasCur && cur.Status == models.AIDraftPending {
+	// A pending draft on an older message is retargeted unless a resolved draft covers the newest.
+	pending := hasCur && cur.Status == models.AIDraftPending
+	retarget := pending && (cur.SourceMessageID == nil || *cur.SourceMessageID != in.id)
+	if !pending || retarget {
+		if err := resolvedDraftBlock(ctx, tx, orgID, p.ThreadID, in); err != nil {
+			return nil, false, err
+		}
+	}
+
+	if pending {
 		if !mailboxInList(p.AllowedMailboxes, cur.EmailAccountID) {
 			return nil, false, ErrDraftMailboxNotAllowed
 		}
 		var d models.AIThreadDraft
+		if !retarget {
+			if err := scanAIDraft(tx.QueryRow(ctx, `
+				UPDATE ai_thread_drafts
+				SET body = $2, model = $3, intent_class = $4, confidence = $5, updated_at = NOW()
+				WHERE id = $1
+				RETURNING `+aiDraftCols, cur.ID, p.Body, p.Model, p.IntentClass, p.Confidence), &d); err != nil {
+				return nil, false, err
+			}
+			return &d, false, tx.Commit(ctx)
+		}
+		// Re-point recipient, subject, threading, sender links and mailbox at the newest message.
+		contactID := contactForDraft(ctx, tx, orgID, in.sender)
+		var campaignID *uuid.UUID
+		if contactID != nil {
+			campaignID = campaignForDraft(ctx, tx, orgID, *contactID)
+		}
 		if err := scanAIDraft(tx.QueryRow(ctx, `
 			UPDATE ai_thread_drafts
-			SET body = $2, model = $3, intent_class = $4, confidence = $5, updated_at = NOW()
+			SET body = $2, model = $3, intent_class = $4, confidence = $5,
+			    source_message_id = $6, to_addr = $7, subject = $8, in_reply_to = $9,
+			    contact_id = $10, campaign_id = $11, email_account_id = $12, owner_user_id = $13, updated_at = NOW()
 			WHERE id = $1
-			RETURNING `+aiDraftCols, cur.ID, p.Body, p.Model, p.IntentClass, p.Confidence), &d); err != nil {
+			RETURNING `+aiDraftCols, cur.ID, p.Body, p.Model, p.IntentClass, p.Confidence,
+			in.id, in.sender, draftReplySubject(in.subject), in.messageID, contactID, campaignID, in.emailID, in.ownerID), &d); err != nil {
 			return nil, false, err
 		}
 		return &d, false, tx.Commit(ctx)
-	}
-
-	// A resolved draft blocks a new one when it answers this inbound message: it
-	// names it as its source, or it was written after the message arrived.
-	var status string
-	err = tx.QueryRow(ctx, `
-		SELECT status FROM ai_thread_drafts
-		WHERE organization_id = $1
-		  AND status <> 'pending'
-		  AND (source_message_id = $2 OR (thread_id = $3 AND created_at >= $4))
-		ORDER BY (status = 'approved') DESC, created_at DESC
-		LIMIT 1`, orgID, in.id, p.ThreadID, in.arrivedAt).Scan(&status)
-	switch {
-	case err == nil && status == models.AIDraftApproved:
-		return nil, false, ErrDraftAlreadySent
-	case err == nil:
-		return nil, false, ErrDraftDiscarded
-	case !errors.Is(err, pgx.ErrNoRows):
-		return nil, false, err
 	}
 
 	d := models.AIThreadDraft{
@@ -336,6 +345,27 @@ func (r *aiDraftRepository) upsertPendingDraftOnce(ctx context.Context, orgID uu
 	return &d, true, tx.Commit(ctx)
 }
 
+// resolvedDraftBlock refuses a draft when a resolved one already answers the message.
+func resolvedDraftBlock(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, threadID string, in *draftInbound) error {
+	var status string
+	err := tx.QueryRow(ctx, `
+		SELECT status FROM ai_thread_drafts
+		WHERE organization_id = $1
+		  AND status <> 'pending'
+		  AND (source_message_id = $2 OR (thread_id = $3 AND created_at >= $4))
+		ORDER BY (status = 'approved') DESC, created_at DESC
+		LIMIT 1`, orgID, in.id, threadID, in.arrivedAt).Scan(&status)
+	switch {
+	case err == nil && status == models.AIDraftApproved:
+		return ErrDraftAlreadySent
+	case err == nil:
+		return ErrDraftDiscarded
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil
+	}
+	return err
+}
+
 // newestInboundForDraft is the org's newest message on the thread that came from
 // someone else: not in an outbound or junk folder and not from the mailbox itself.
 func newestInboundForDraft(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, threadID string) (*draftInbound, error) {
@@ -346,8 +376,7 @@ func newestInboundForDraft(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, thre
 		WHERE ea.organization_id = $1
 		  AND COALESCE(NULLIF(ue.thread_id, ''), ue.id::text) = $2
 		  AND ue.folder NOT IN ('sent', 'drafts', 'spam', 'trash')
-		ORDER BY ue.internal_date DESC, ue.id DESC
-		LIMIT 25`, orgID, threadID)
+		ORDER BY ue.internal_date DESC, ue.id DESC`, orgID, threadID)
 	if err != nil {
 		return nil, err
 	}

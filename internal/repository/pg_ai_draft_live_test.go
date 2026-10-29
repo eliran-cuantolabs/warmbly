@@ -211,6 +211,70 @@ func TestLiveUpsertThreadDraft(t *testing.T) {
 		}
 	})
 
+	t.Run("a pending draft on an older message is retargeted at the newest inbound message", func(t *testing.T) {
+		f := newThreadDraftFixture(t, pool)
+		contact := uuid.New()
+		f.exec(`INSERT INTO contacts(id,user_id,organization_id,email,first_name,last_name,company,phone,custom_fields) VALUES($1,$2,$3,'second@example.test','','','','','{}')`, contact, f.user, f.org)
+		old := f.message("th-6", "inbox", "first@example.test", "Quote", base)
+		first, created, err := f.repo.UpsertPendingDraftForThread(ctx, f.org, draftParams("th-6", "one"))
+		if err != nil || !created || *first.SourceMessageID != old {
+			t.Fatalf("first: %+v created=%v err=%v", first, created, err)
+		}
+		// The newest message arrived in a second mailbox of the workspace.
+		other := uuid.New()
+		f.exec(`INSERT INTO email_accounts (id, user_id, organization_id, email, name, signature_plain, signature_html, provider, warmup_max)
+		        VALUES ($1, $2, $3, $4, 'Other', '', '', 'smtp_imap', 40)`, other, f.user, f.org, "other-"+uuid.NewString()+"@example.test")
+		t.Cleanup(func() {
+			f.exec(`DELETE FROM ai_thread_drafts WHERE organization_id = $1`, f.org)
+			f.exec(`DELETE FROM unibox_emails WHERE email_id = $1`, other)
+			f.exec(`DELETE FROM email_accounts WHERE id = $1`, other)
+		})
+		newest := uuid.New()
+		f.exec(`INSERT INTO unibox_emails (id, user_id, email_id, thread_id, message_id, from_addr, to_addr, subject, folder, internal_date)
+		        VALUES ($1, $2, $3, 'th-6', $4, ARRAY['Second <second@example.test>']::text[], ARRAY['other@example.test']::text[], 'Re: Quote (final)', 'inbox', $5)`,
+			newest, f.user, other, "<"+newest.String()+"@lead.test>", base.Add(time.Hour))
+
+		d, created, err := f.repo.UpsertPendingDraftForThread(ctx, f.org, draftParams("th-6", "two"))
+		if err != nil || created || d.ID != first.ID {
+			t.Fatalf("retarget: id=%s want %s created=%v err=%v", d.ID, first.ID, created, err)
+		}
+		got, err := f.repo.GetDraft(ctx, f.org, first.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Body != "two" || got.SourceMessageID == nil || *got.SourceMessageID != newest ||
+			got.ToAddr != "second@example.test" || got.Subject != "Re: Quote (final)" ||
+			got.InReplyTo != "<"+newest.String()+"@lead.test>" || got.ContactID == nil || *got.ContactID != contact ||
+			got.EmailAccountID != other {
+			t.Fatalf("draft still answers the old message: %+v", got)
+		}
+		if n, _ := f.drafts(t, "th-6"); n != 1 {
+			t.Fatalf("%d drafts, want 1", n)
+		}
+	})
+
+	t.Run("a pending draft on an older message is left alone when a resolved draft covers the newest", func(t *testing.T) {
+		f := newThreadDraftFixture(t, pool)
+		f.message("th-7", "inbox", "lead@example.test", "Hi", base)
+		first, _, err := f.repo.UpsertPendingDraftForThread(ctx, f.org, draftParams("th-7", "pending"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		newest := f.message("th-7", "inbox", "lead@example.test", "Re: Hi", base.Add(time.Hour))
+		f.exec(`INSERT INTO ai_thread_drafts (id, organization_id, email_account_id, owner_user_id, thread_id, source_message_id,
+		            to_addr, subject, in_reply_to, body, intent_class, confidence, model, status, created_at, updated_at)
+		        VALUES ($1,$2,$3,$4,'th-7',$5,'lead@example.test','Re: Hi','','sent','',0,'agent','approved',NOW(),NOW())`,
+			uuid.New(), f.org, f.account, f.user, newest)
+
+		if _, _, err := f.repo.UpsertPendingDraftForThread(ctx, f.org, draftParams("th-7", "changed")); !errors.Is(err, ErrDraftAlreadySent) {
+			t.Fatalf("err = %v, want ErrDraftAlreadySent", err)
+		}
+		got, _ := f.repo.GetDraft(ctx, f.org, first.ID)
+		if got.Body != "pending" || *got.SourceMessageID == newest {
+			t.Fatalf("pending draft changed: %+v", got)
+		}
+	})
+
 	t.Run("mailbox allowlist", func(t *testing.T) {
 		f := newThreadDraftFixture(t, pool)
 		f.message("th-6", "inbox", "lead@example.test", "Hi", base)
