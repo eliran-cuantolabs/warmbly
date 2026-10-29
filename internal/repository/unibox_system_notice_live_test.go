@@ -136,6 +136,7 @@ func TestLiveUniboxSystemNoticeLandsArchivedAndOutOfEveryView(t *testing.T) {
 	if got := search(models.MailSearchParams{IncludeArchived: &yes, Subject: &query}); !listsThread(got, "thread-alert") {
 		t.Fatalf("all mail search = %v, want the notice findable", threadIDs(got))
 	}
+	hidden("inbox search", search(models.MailSearchParams{Folder: &inbox, Subject: &query}))
 
 	ov, err := repo.Overview(ctx, f.org)
 	if err != nil {
@@ -145,8 +146,11 @@ func TestLiveUniboxSystemNoticeLandsArchivedAndOutOfEveryView(t *testing.T) {
 		t.Fatalf("overview total=%d unread=%d automated=%d, want 2, 2, 0", ov.Total, ov.Unread, ov.Automated)
 	}
 	for _, fo := range ov.Folders {
-		if fo.Folder == models.FolderArchive && fo.Total != 0 {
-			t.Fatalf("archive folder total = %d, want 0", fo.Total)
+		if fo.Folder == models.FolderArchive && (fo.Total != 2 || fo.Unread != 0) {
+			t.Fatalf("archive folder total=%d unread=%d, want the 2 read notices it lists", fo.Total, fo.Unread)
+		}
+		if fo.Folder == models.FolderInbox && fo.Total != 2 {
+			t.Fatalf("inbox folder total = %d, want 2", fo.Total)
 		}
 	}
 	if n, err := repo.GetUnseenCount(ctx, f.org, nil); err != nil || n != 2 {
@@ -225,5 +229,77 @@ func TestLiveUniboxSystemNoticeBackfillIsIdempotent(t *testing.T) {
 	}
 	if after := readPlacement(t, handle, google); !after.updatedAt.Equal(before.updatedAt) {
 		t.Fatal("rerun touched an already treated row")
+	}
+}
+
+func TestLiveUniboxSystemNoticeFiledIntoInboxBecomesMail(t *testing.T) {
+	handle := liveFreshUniboxDB(t)
+	f := newUniboxFolderFixture(t, handle.Pool)
+	repo := NewUniboxRepository(handle)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	alert := f.scopedMessage(t, repo, "thread-alert", "Google <no-reply@accounts.google.com>", models.FolderInbox, now)
+	other := f.scopedMessage(t, repo, "thread-other", "Gmail Team <mail-noreply@google.com>", models.FolderInbox, now)
+
+	// Filing elsewhere keeps the notice a notice.
+	if _, err := repo.MoveThreadsToFolder(ctx, f.org, []string{"thread-other"}, models.FolderTrash); err != nil {
+		t.Fatalf("MoveThreadsToFolder trash: %v", err)
+	}
+	if p := readPlacement(t, handle, other); p.folder != models.FolderTrash || !p.systemNotice || !p.automated {
+		t.Fatalf("notice filed to trash = %+v, want still a system notice", p)
+	}
+
+	if _, err := repo.MoveThreadsToFolder(ctx, f.org, []string{"thread-alert"}, models.FolderInbox); err != nil {
+		t.Fatalf("MoveThreadsToFolder inbox: %v", err)
+	}
+	if p := readPlacement(t, handle, alert); p.folder != models.FolderInbox || p.systemNotice || p.automated {
+		t.Fatalf("notice filed into inbox = %+v, want ordinary inbox mail", p)
+	}
+	no, inbox := false, models.FolderInbox
+	res, err := repo.Search(ctx, f.org, &models.MailSearchParams{Folder: &inbox, Automated: &no, PageSize: 50})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if !listsThread(res, "thread-alert") {
+		t.Fatalf("inbox = %v, want the notice the user filed there", threadIDs(res))
+	}
+
+	if _, err := repo.MoveToFolderBulk(ctx, f.org, []uuid.UUID{other}, models.FolderInbox); err != nil {
+		t.Fatalf("MoveToFolderBulk inbox: %v", err)
+	}
+	if p := readPlacement(t, handle, other); p.folder != models.FolderInbox || p.systemNotice {
+		t.Fatalf("notice moved into inbox by id = %+v, want ordinary inbox mail", p)
+	}
+}
+
+// The daily reply repair never hands a provider notice to reply detection, even from a contact's address.
+func TestLiveUniboxSystemNoticeSkippedByReplyRepair(t *testing.T) {
+	handle := liveFreshUniboxDB(t)
+	f := newUniboxFolderFixture(t, handle.Pool)
+	repo := NewUniboxRepository(handle)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	for _, addr := range []string{"no-reply@accounts.google.com", "lead@example.com"} {
+		// contacts.created_at has no time zone: NOW() keeps it in the session's, as the server writes it.
+		if _, err := handle.Pool.Exec(ctx, `INSERT INTO contacts (id, user_id, organization_id, first_name, last_name, email, company, phone, custom_fields, created_at)
+			VALUES ($1, $2, $3, '', '', $4, '', '', '{}'::jsonb, NOW() - interval '1 hour')`, uuid.New(), f.user, f.org, addr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	notice := f.scopedMessage(t, repo, "thread-alert", "Google <no-reply@accounts.google.com>", models.FolderInbox, now)
+	reply := f.scopedMessage(t, repo, "thread-lead", "Lead <lead@example.com>", models.FolderInbox, now)
+
+	page, err := repo.ListUnprocessedCampaignReplies(ctx, now.Add(-time.Hour), uuid.Nil, 100)
+	if err != nil {
+		t.Fatalf("ListUnprocessedCampaignReplies: %v", err)
+	}
+	var got []uuid.UUID
+	for _, ev := range page.Events {
+		got = append(got, ev.Message.ID)
+	}
+	if len(got) != 1 || got[0] != reply {
+		t.Fatalf("repair listed %v, want only the lead reply %s (notice %s skipped)", got, reply, notice)
 	}
 }

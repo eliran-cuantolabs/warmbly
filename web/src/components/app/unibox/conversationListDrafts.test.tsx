@@ -6,7 +6,11 @@ import { cleanup, render, screen } from "@testing-library/react";
 import type { UniboxSearchParams } from "@/lib/api/models/app/unibox/UniboxSearch";
 import { ConversationList } from "./ConversationList";
 
-const search = vi.hoisted(() => ({ calls: [] as { params: UniboxSearchParams; enabled: boolean }[] }));
+const search = vi.hoisted(() => ({
+  calls: [] as { params: UniboxSearchParams; enabled: boolean }[],
+  agentHasMore: false,
+  agentNextPage: [] as string[],
+}));
 
 function row(id: string, thread: string, subject: string) {
   return {
@@ -38,10 +42,13 @@ vi.mock("@/lib/api/hooks/app/unibox/useUniboxSearch", () => ({
       isFetching: false,
       isPlaceholderData: false,
       isError: false,
-      hasNextPage: false,
+      hasNextPage: enabled && !!params.agentDrafts && search.agentHasMore,
       isFetchingNextPage: false,
       isFetchNextPageError: false,
-      fetchNextPage: () => Promise.resolve(),
+      fetchNextPage: () => {
+        search.agentNextPage.push(params.agentDrafts ? "agent" : "mailbox");
+        return Promise.resolve();
+      },
       refetch: () => Promise.resolve(),
     };
   },
@@ -72,6 +79,8 @@ vi.mock("framer-motion", async (importOriginal) => ({
 afterEach(() => {
   cleanup();
   search.calls = [];
+  search.agentHasMore = false;
+  search.agentNextPage = [];
 });
 
 function mount(params: UniboxSearchParams, scopeKey: string) {
@@ -108,4 +117,19 @@ it("leaves every other folder alone", () => {
   expect(screen.queryByText("Agent drafts")).toBeNull();
   expect(search.calls.filter((c) => c.params.agentDrafts).every((c) => !c.enabled)).toBe(true);
   expect(screen.getAllByTestId("row")).toHaveLength(2);
+});
+
+it("loads every page of pending agent drafts, not just the first", () => {
+  search.agentHasMore = true;
+  mount({ sortBy: "newest", folder: "drafts" }, "folder:drafts");
+
+  expect(search.agentNextPage).toContain("agent");
+  expect(search.agentNextPage).not.toContain("mailbox");
+});
+
+it("never pages agent drafts outside the Drafts folder", () => {
+  search.agentHasMore = true;
+  mount({ sortBy: "newest", folder: "inbox", automated: false }, "folder:inbox");
+
+  expect(search.agentNextPage).toEqual([]);
 });

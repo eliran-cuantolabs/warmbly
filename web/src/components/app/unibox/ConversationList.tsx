@@ -132,6 +132,16 @@ export function ConversationList({
     [merged],
   );
   const agent = useUniboxSearch(agentParams, `${scopeKey}:agent`, draftsFolder);
+  // Pending agent drafts are few, so every page loads up front: one past the first must not drop off the list.
+  const {
+    hasNextPage: agentHasMore,
+    isFetchingNextPage: agentLoadingMore,
+    isFetchNextPageError: agentMoreFailed,
+    fetchNextPage: fetchMoreAgent,
+  } = agent;
+  React.useEffect(() => {
+    if (draftsFolder && agentHasMore && !agentLoadingMore && !agentMoreFailed) void fetchMoreAgent();
+  }, [draftsFolder, agentHasMore, agentLoadingMore, agentMoreFailed, fetchMoreAgent]);
   const agentRows = draftsFolder ? agent.emails : NO_ROWS;
   const agentKeys = React.useMemo(
     () => new Set(agentRows.map((r) => r.thread_id || r.id)),

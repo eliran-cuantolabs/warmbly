@@ -761,11 +761,11 @@ func uniboxSearchQuery(orgID uuid.UUID, params *models.MailSearchParams) (string
 		inner += ` AND ue.folder NOT IN ` + foldersOutsideWorkingViews
 	}
 
-	// System notices show only in their own folder (never Inbox) and in a search.
+	// System notices never show in Inbox, searched or not; outside a folder only a search finds them.
 	searching := (params.Subject != nil && *params.Subject != "") ||
 		(params.Sender != nil && *params.Sender != "") ||
 		(params.Address != nil && *params.Address != "")
-	if !searching && (params.Folder == nil || *params.Folder == models.FolderInbox) {
+	if (params.Folder != nil && *params.Folder == models.FolderInbox) || (params.Folder == nil && !searching) {
 		inner += ` AND NOT ue.system_notice`
 	}
 
@@ -1218,7 +1218,7 @@ func (r *uniboxRepository) MoveToFolderBulk(ctx context.Context, orgID uuid.UUID
 		return nil, nil
 	}
 	return r.fileRows(ctx,
-		`UPDATE unibox_emails u SET folder = $1, updated_at = NOW()
+		`UPDATE unibox_emails u SET folder = $1, updated_at = NOW(),`+fileIntoInboxClearsNotice+`
 		 FROM unibox_emails prev
 		 WHERE prev.id = u.id AND u.id = ANY($3)
 		   AND u.email_id IN (SELECT id FROM email_accounts WHERE organization_id = $2)
@@ -1235,7 +1235,7 @@ func (r *uniboxRepository) MoveThreadsToFolder(ctx context.Context, orgID uuid.U
 		return nil, nil
 	}
 	return r.fileRows(ctx,
-		`UPDATE unibox_emails u SET folder = $1, updated_at = NOW()
+		`UPDATE unibox_emails u SET folder = $1, updated_at = NOW(),`+fileIntoInboxClearsNotice+`
 		 FROM unibox_emails prev
 		 WHERE prev.id = u.id AND COALESCE(NULLIF(u.thread_id, ''), u.id::text) = ANY($3)
 		   AND u.email_id IN (SELECT id FROM email_accounts WHERE organization_id = $2)
@@ -1243,6 +1243,11 @@ func (r *uniboxRepository) MoveThreadsToFolder(ctx context.Context, orgID uuid.U
 		folder, orgID, threadIDs,
 	)
 }
+
+// fileIntoInboxClearsNotice is the SET tail of a user's filing: a system notice someone files into Inbox becomes their mail again.
+const fileIntoInboxClearsNotice = `
+		     automated = CASE WHEN u.system_notice AND $1 = 'inbox' THEN false ELSE u.automated END,
+		     system_notice = u.system_notice AND $1 <> 'inbox'`
 
 // fileRows runs a filing UPDATE. Rows already in the folder come back too,
 // unmoved: the provider may still disagree with them. prev is the row as the
@@ -1846,7 +1851,8 @@ func (r *uniboxRepository) overview(ctx context.Context, orgID uuid.UUID, accoun
 			  AND s.snoozed_until > NOW()
 		  )
 		  AND NOT (e.folder = 'inbox' AND `+automatedThreadSQL("e.thread_id", "e.automated", "$1")+`)
-		  AND NOT e.system_notice
+		  -- Archive lists its notices, so only Inbox leaves them out of its count.
+		  AND NOT (e.folder = 'inbox' AND e.system_notice)
 		GROUP BY e.folder
 	`, orgID)
 	if err != nil {
