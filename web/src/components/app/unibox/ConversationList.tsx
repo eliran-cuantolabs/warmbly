@@ -132,16 +132,6 @@ export function ConversationList({
     [merged],
   );
   const agent = useUniboxSearch(agentParams, `${scopeKey}:agent`, draftsFolder);
-  // Pending agent drafts are few, so every page loads up front: one past the first must not drop off the list.
-  const {
-    hasNextPage: agentHasMore,
-    isFetchingNextPage: agentLoadingMore,
-    isFetchNextPageError: agentMoreFailed,
-    fetchNextPage: fetchMoreAgent,
-  } = agent;
-  React.useEffect(() => {
-    if (draftsFolder && agentHasMore && !agentLoadingMore && !agentMoreFailed) void fetchMoreAgent();
-  }, [draftsFolder, agentHasMore, agentLoadingMore, agentMoreFailed, fetchMoreAgent]);
   const agentRows = draftsFolder ? agent.emails : NO_ROWS;
   const agentKeys = React.useMemo(
     () => new Set(agentRows.map((r) => r.thread_id || r.id)),
@@ -240,9 +230,13 @@ export function ConversationList({
   // a bar along the top and the stale rows dimmed. Background refetches from
   // realtime events do not qualify, so nothing flickers while reading. The
   // bar waits 150ms so a fast response never shows it at all.
-  const stale = q.isPlaceholderData && q.isFetching;
+  const stale = (q.isPlaceholderData && q.isFetching) ||
+    (draftsFolder && agent.isPlaceholderData && agent.isFetching);
   const showProgress = useDelayed(stale, 150);
-  const firstLoad = (q.isPending || q.isPlaceholderData) && emails.length === 0;
+  const firstLoad = (q.isPending || q.isPlaceholderData ||
+    (draftsFolder && (agent.isPending || agent.isPlaceholderData))) && emails.length === 0;
+  const failedQuery = q.isError && !q.isFetchNextPageError ? q :
+    draftsFolder && agent.isError && !agent.isFetchNextPageError ? agent : undefined;
 
   // Where this exact list was left. Opening a thread keeps the page mounted
   // (see the route's stableParams in main.tsx), so this covers what that
@@ -257,13 +251,16 @@ export function ConversationList({
   // data is on screen, which lags the request key for as long as the previous
   // rows are standing in, so the swap remounts rather than animates.
   const shownKey = React.useRef(listKey);
-  if (!q.isPlaceholderData) shownKey.current = listKey;
+  if (!q.isPlaceholderData && (!draftsFolder || !agent.isPlaceholderData)) shownKey.current = listKey;
 
   // Infinite scroll: reaching the end of the list loads the next page instead
   // of asking for a click. The button below stays as the manual fallback, and
   // isFetchingNextPage is a dependency so a page landing re-arms the observer:
   // a sentinel still on screen keeps pulling instead of stalling one page in.
-  const { hasNextPage, isFetchingNextPage, isFetchNextPageError, fetchNextPage } = q;
+  // Page agent drafts first, using the same bounded scroll and retry behavior as mailbox drafts.
+  const nextQuery = draftsFolder && agent.hasNextPage ? agent : q;
+  const { isFetchingNextPage, isFetchNextPageError, fetchNextPage } = nextQuery;
+  const hasNextPage = q.hasNextPage || (draftsFolder && agent.hasNextPage);
   React.useEffect(() => {
     const root = listRef.current;
     // A page that failed stays failed until the user asks again; re-arming on
@@ -569,17 +566,17 @@ export function ConversationList({
       >
         {firstLoad ? (
           <SkeletonRows />
-        ) : q.isError && emails.length === 0 ? (
+        ) : failedQuery && emails.length === 0 ? (
           <div className="px-5 py-12 text-center">
             <p className="text-[12.5px] text-slate-900 font-medium mb-1">
               Couldn't load inbox
             </p>
             <p className="text-[11.5px] text-slate-500 mb-3">
-              {q.error?.message ?? "Request failed"}
+              {failedQuery.error?.message ?? "Request failed"}
             </p>
             <button
               type="button"
-              onClick={() => q.refetch()}
+              onClick={() => failedQuery.refetch()}
               className="h-7 px-2.5 rounded-md bg-slate-900 hover:bg-slate-800 text-white text-[12px] font-medium transition-colors"
             >
               Try again
@@ -587,6 +584,14 @@ export function ConversationList({
           </div>
         ) : (
           <React.Fragment key={shownKey.current}>
+            {failedQuery && (
+              <div role="alert" className="px-4 py-3 text-[12px] text-rose-600">
+                Some conversations couldn't load.{" "}
+                <button type="button" onClick={() => failedQuery.refetch()} className="underline">
+                  Try again
+                </button>
+              </div>
+            )}
             <AnimatePresence>
               {items.map((item) =>
                 item.kind === "header" ? (
@@ -652,7 +657,7 @@ export function ConversationList({
                 ones can still animate out when an action empties the list. It
                 waits for them before it appears. */}
             <AnimatePresence>
-              {emails.length === 0 && !hasNextPage && (
+              {emails.length === 0 && !hasNextPage && !failedQuery && (
                 <motion.div
                   key="empty"
                   initial={{ opacity: 0, y: 6 }}

@@ -2,7 +2,7 @@
 
 import React from "react";
 import { afterEach, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { UniboxSearchParams } from "@/lib/api/models/app/unibox/UniboxSearch";
 import { ConversationList } from "./ConversationList";
 
@@ -10,6 +10,10 @@ const search = vi.hoisted(() => ({
   calls: [] as { params: UniboxSearchParams; enabled: boolean }[],
   agentHasMore: false,
   agentNextPage: [] as string[],
+  agentPending: false,
+  agentFailed: false,
+  agentRefetches: 0,
+  mailboxEmpty: false,
 }));
 
 function row(id: string, thread: string, subject: string) {
@@ -34,14 +38,15 @@ vi.mock("@/lib/api/hooks/app/unibox/useUniboxSearch", () => ({
     const emails = !enabled
       ? []
       : params.agentDrafts
-        ? [row("a1", "t-agent", "Agent reply to a lead"), row("a2", "t-both", "Agent reply on a drafted thread")]
-        : [row("d1", "t-mine", "My own draft"), row("d2", "t-both", "Provider copy of a drafted thread")];
+        ? search.agentPending || search.agentFailed ? [] : [row("a1", "t-agent", "Agent reply to a lead"), row("a2", "t-both", "Agent reply on a drafted thread")]
+        : search.mailboxEmpty ? [] : [row("d1", "t-mine", "My own draft"), row("d2", "t-both", "Provider copy of a drafted thread")];
     return {
       emails,
-      isPending: false,
+      isPending: !!params.agentDrafts && search.agentPending,
       isFetching: false,
       isPlaceholderData: false,
-      isError: false,
+      isError: !!params.agentDrafts && search.agentFailed,
+      error: search.agentFailed ? new Error("Draft request failed") : null,
       hasNextPage: enabled && !!params.agentDrafts && search.agentHasMore,
       isFetchingNextPage: false,
       isFetchNextPageError: false,
@@ -49,7 +54,10 @@ vi.mock("@/lib/api/hooks/app/unibox/useUniboxSearch", () => ({
         search.agentNextPage.push(params.agentDrafts ? "agent" : "mailbox");
         return Promise.resolve();
       },
-      refetch: () => Promise.resolve(),
+      refetch: () => {
+        if (params.agentDrafts) search.agentRefetches++;
+        return Promise.resolve();
+      },
     };
   },
 }));
@@ -81,6 +89,10 @@ afterEach(() => {
   search.calls = [];
   search.agentHasMore = false;
   search.agentNextPage = [];
+  search.agentPending = false;
+  search.agentFailed = false;
+  search.agentRefetches = 0;
+  search.mailboxEmpty = false;
 });
 
 function mount(params: UniboxSearchParams, scopeKey: string) {
@@ -119,12 +131,58 @@ it("leaves every other folder alone", () => {
   expect(screen.getAllByTestId("row")).toHaveLength(2);
 });
 
-it("loads every page of pending agent drafts, not just the first", () => {
+it("pages pending agent drafts through Load more without eagerly fetching every page", () => {
   search.agentHasMore = true;
   mount({ sortBy: "newest", folder: "drafts" }, "folder:drafts");
 
-  expect(search.agentNextPage).toContain("agent");
+  expect(search.agentNextPage).toEqual([]);
+  fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+  expect(search.agentNextPage).toEqual(["agent"]);
   expect(search.agentNextPage).not.toContain("mailbox");
+});
+
+it("does not claim Drafts is empty while agent drafts are still loading", () => {
+  search.agentPending = true;
+  search.mailboxEmpty = true;
+  const { container } = mount({ sortBy: "newest", folder: "drafts" }, "folder:drafts");
+
+  expect(container.querySelector(".animate-pulse")).toBeTruthy();
+  expect(screen.queryByText(/No conversations/)).toBeNull();
+});
+
+it("offers a retry when agent drafts fail while keeping mailbox drafts visible", () => {
+  search.agentFailed = true;
+  mount({ sortBy: "newest", folder: "drafts" }, "folder:drafts");
+
+  expect(screen.getByRole("alert").textContent).toContain("couldn't load");
+  expect(screen.getByText("My own draft")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  expect(search.agentRefetches).toBe(1);
+});
+
+it("shows a retry instead of an empty folder when the agent request fails", () => {
+  search.agentFailed = true;
+  search.mailboxEmpty = true;
+  mount({ sortBy: "newest", folder: "drafts" }, "folder:drafts");
+
+  expect(screen.getByText("Couldn't load inbox")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  expect(search.agentRefetches).toBe(1);
+});
+
+it("preserves mailbox, category and search filters for agent drafts", () => {
+  mount({ sortBy: "newest", folder: "drafts", accountIds: ["mailbox"], categoryIds: ["category"], query: "proposal" }, "folder:drafts");
+
+  expect(search.calls.find((c) => c.params.agentDrafts)?.params).toMatchObject({
+    accountIds: ["mailbox"], categoryIds: ["category"], query: "proposal",
+  });
+});
+
+it("keeps an explicitly empty mailbox scope empty", () => {
+  mount({ sortBy: "newest", folder: "drafts", accountIds: [] }, "folder:drafts");
+
+  expect(search.calls.every((c) => !c.enabled)).toBe(true);
+  expect(screen.queryAllByTestId("row")).toHaveLength(0);
 });
 
 it("never pages agent drafts outside the Drafts folder", () => {

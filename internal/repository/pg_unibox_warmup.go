@@ -164,7 +164,6 @@ func (r *uniboxRepository) ListUnprocessedCampaignReplies(ctx context.Context, s
 	scan, err := r.db.Query(ctx, `SELECT u.id FROM unibox_emails u
 		WHERE u.id > $1 AND u.created_at >= $2 AND u.campaign_reply_processed_at IS NULL
 		AND u.folder NOT IN ('sent', 'drafts') AND u.provider_folder NOT IN ('sent', 'drafts')
-		AND NOT u.system_notice
 		ORDER BY u.id LIMIT $3`, afterID, since, scanSize)
 	if err != nil {
 		return page, err
@@ -198,8 +197,6 @@ func (r *uniboxRepository) ListUnprocessedCampaignReplies(ctx context.Context, s
 		  AND u.campaign_reply_processed_at IS NULL
 		  AND u.folder NOT IN ('sent', 'drafts')
 		  AND u.provider_folder NOT IN ('sent', 'drafts')
-		  -- A provider notice is nobody's reply; ingest never stamps it, so repair must skip it too.
-		  AND NOT u.system_notice
 		  AND (
 		    -- Both forms of each header against the raw column, so idx_tasks_message_id serves it.
 		    EXISTS (
