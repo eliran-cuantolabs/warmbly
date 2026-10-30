@@ -276,7 +276,7 @@ export function ScopeRail({ scope, onChange, browseKey = "desktop" }: ScopeRailP
     const counts = folderCounts.get(folder);
     // Drafts reads better as a total, pending agent drafts included; everywhere else the number is unread.
     const agentDrafts = folder === "drafts" ? (data?.awaiting_agent_draft ?? 0) : 0;
-    const count = folder === "drafts" ? (counts?.total ?? 0) + agentDrafts : counts?.unread;
+    const count = folder === "drafts" ? (data?.drafts ?? counts?.total) : counts?.unread;
     return {
       key: `folder:${folder}`,
       label,

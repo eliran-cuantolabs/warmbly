@@ -54,6 +54,74 @@ func (f *uniboxFolderFixture) mailboxAddress(t *testing.T, repo UniboxRepository
 	return ov.Mailboxes[0].Email
 }
 
+func TestLiveUniboxScopeDraftsCountMatchesVisibleUnion(t *testing.T) {
+	handle := liveUniboxFolderDB(t)
+	f := newUniboxFolderFixture(t, handle.Pool)
+	other := newUniboxFolderFixture(t, handle.Pool)
+	repo := NewUniboxRepository(handle)
+	ctx := t.Context()
+	now := time.Now().UTC()
+	for _, tc := range []struct {
+		thread string
+		folder string
+		status string
+	}{
+		{"mailbox-only", models.FolderDrafts, ""},
+		{"overlap", models.FolderDrafts, "pending"},
+		{"agent-only", models.FolderInbox, "pending"},
+		{"archived", models.FolderArchive, "pending"},
+		{"trashed", models.FolderTrash, "pending"},
+		{"snoozed", models.FolderInbox, "pending"},
+		{"resolved", models.FolderInbox, "discarded"},
+	} {
+		f.scopedMessage(t, repo, tc.thread, "them@example.com", tc.folder, now)
+		if tc.status != "" {
+			if _, err := handle.Pool.Exec(ctx, `INSERT INTO ai_thread_drafts
+				(id, organization_id, email_account_id, owner_user_id, thread_id, to_addr, status)
+				VALUES ($1,$2,$3,$4,$5,'them@example.com',$6)`, uuid.New(), f.org, f.mailbox, f.user, tc.thread, tc.status); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if _, err := repo.UpsertSnoozes(ctx, f.org, f.user, []string{"snoozed"}, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = repo.DeleteSnoozes(context.Background(), f.org, f.user, []string{"snoozed"}) })
+	other.scopedMessage(t, repo, "another-workspace", "them@example.com", models.FolderDrafts, now)
+
+	folder, agent := models.FolderDrafts, true
+	mailboxRows, err := repo.Search(ctx, f.org, &models.MailSearchParams{Folder: &folder, PageSize: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentRows, err := repo.Search(ctx, f.org, &models.MailSearchParams{AgentDraft: &agent, PageSize: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	visible := make(map[string]bool)
+	for _, result := range []*models.MailSearchResult{mailboxRows, agentRows} {
+		for _, thread := range threadIDs(result) {
+			visible[thread] = true
+		}
+	}
+	if len(visible) != 3 {
+		t.Fatalf("visible draft threads = %v, want mailbox-only, overlap and agent-only", visible)
+	}
+	overview, err := repo.Overview(ctx, f.org)
+	if err != nil || overview.Drafts != int64(len(visible)) {
+		t.Fatalf("overview = %+v, error = %v, want %d distinct drafts", overview, err, len(visible))
+	}
+	for _, count := range overview.Folders {
+		if count.Folder == models.FolderDrafts && count.Total != 2 {
+			t.Fatalf("legacy mailbox Drafts total changed: %+v", count)
+		}
+	}
+	restricted, err := repo.OverviewForMailboxes(ctx, f.org, []uuid.UUID{other.mailbox})
+	if err != nil || restricted.Drafts != 0 {
+		t.Fatalf("restricted overview = %+v, error = %v, want no drafts", restricted, err)
+	}
+}
+
 func threadIDs(res *models.MailSearchResult) []string {
 	out := make([]string, 0, len(res.Data))
 	for _, row := range res.Data {

@@ -9,6 +9,8 @@ import { ConversationList } from "./ConversationList";
 const search = vi.hoisted(() => ({
   calls: [] as { params: UniboxSearchParams; enabled: boolean }[],
   agentHasMore: false,
+  agentPageFailed: false,
+  mailboxHasMore: false,
   agentNextPage: [] as string[],
   agentPending: false,
   agentFailed: false,
@@ -47,9 +49,9 @@ vi.mock("@/lib/api/hooks/app/unibox/useUniboxSearch", () => ({
       isPlaceholderData: false,
       isError: !!params.agentDrafts && search.agentFailed,
       error: search.agentFailed ? new Error("Draft request failed") : null,
-      hasNextPage: enabled && !!params.agentDrafts && search.agentHasMore,
+      hasNextPage: enabled && (params.agentDrafts ? search.agentHasMore : search.mailboxHasMore),
       isFetchingNextPage: false,
-      isFetchNextPageError: false,
+      isFetchNextPageError: !!params.agentDrafts && search.agentPageFailed,
       fetchNextPage: () => {
         search.agentNextPage.push(params.agentDrafts ? "agent" : "mailbox");
         return Promise.resolve();
@@ -88,6 +90,8 @@ afterEach(() => {
   cleanup();
   search.calls = [];
   search.agentHasMore = false;
+  search.agentPageFailed = false;
+  search.mailboxHasMore = false;
   search.agentNextPage = [];
   search.agentPending = false;
   search.agentFailed = false;
@@ -190,4 +194,16 @@ it("never pages agent drafts outside the Drafts folder", () => {
   mount({ sortBy: "newest", folder: "inbox", automated: false }, "folder:inbox");
 
   expect(search.agentNextPage).toEqual([]);
+});
+
+it("keeps mailbox pagination and a separate agent retry reachable after an agent-page failure", () => {
+  search.agentHasMore = true;
+  search.agentPageFailed = true;
+  search.mailboxHasMore = true;
+  mount({ sortBy: "newest", folder: "drafts" }, "folder:drafts");
+
+  fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+  expect(search.agentNextPage).toEqual(["mailbox"]);
+  fireEvent.click(screen.getByRole("button", { name: "Retry agent drafts" }));
+  expect(search.agentNextPage).toEqual(["mailbox", "agent"]);
 });

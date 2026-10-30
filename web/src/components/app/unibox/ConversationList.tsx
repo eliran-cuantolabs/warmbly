@@ -258,7 +258,8 @@ export function ConversationList({
   // isFetchingNextPage is a dependency so a page landing re-arms the observer:
   // a sentinel still on screen keeps pulling instead of stalling one page in.
   // Page agent drafts first, using the same bounded scroll and retry behavior as mailbox drafts.
-  const nextQuery = draftsFolder && agent.hasNextPage ? agent : q;
+  const nextQuery = draftsFolder && agent.hasNextPage &&
+    (!agent.isFetchNextPageError || !q.hasNextPage) ? agent : q;
   const { isFetchingNextPage, isFetchNextPageError, fetchNextPage } = nextQuery;
   const hasNextPage = q.hasNextPage || (draftsFolder && agent.hasNextPage);
   React.useEffect(() => {
@@ -584,6 +585,14 @@ export function ConversationList({
           </div>
         ) : (
           <React.Fragment key={shownKey.current}>
+            {draftsFolder && agent.isFetchNextPageError && nextQuery !== agent && (
+              <div role="alert" className="px-4 py-3 text-[12px] text-rose-600">
+                Couldn't load more agent drafts.{" "}
+                <button type="button" onClick={() => agent.fetchNextPage()} className="underline">
+                  Retry agent drafts
+                </button>
+              </div>
+            )}
             {failedQuery && (
               <div role="alert" className="px-4 py-3 text-[12px] text-rose-600">
                 Some conversations couldn't load.{" "}
